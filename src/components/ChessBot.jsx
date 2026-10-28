@@ -6,7 +6,9 @@ import {
   ShieldAlert, 
   Volume2, 
   VolumeX, 
-  Crown
+  Crown,
+  Sparkles,
+  Zap
 } from 'lucide-react';
 
 // SVG Chess Pieces
@@ -73,6 +75,118 @@ const PIECES = {
   ),
 };
 
+// ==================== BUILT-IN FALLBACK MINIMAX ENGINE ====================
+const PIECE_VALUES = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+
+const PST_PAWN = [
+  0,  0,  0,  0,  0,  0,  0,  0,
+  50, 50, 50, 50, 50, 50, 50, 50,
+  10, 10, 20, 30, 30, 20, 10, 10,
+   5,  5, 10, 25, 25, 10,  5,  5,
+   0,  0,  0, 20, 20,  0,  0,  0,
+   5, -5,-10,  0,  0,-10, -5,  5,
+   5, 10, 10,-20,-20, 10, 10,  5,
+   0,  0,  0,  0,  0,  0,  0,  0
+];
+
+const PST_KNIGHT = [
+  -50,-40,-30,-30,-30,-30,-40,-50,
+  -40,-20,  0,  0,  0,  0,-20,-40,
+  -30,  0, 10, 15, 15, 10,  0,-30,
+  -30,  5, 15, 20, 20, 15,  5,-30,
+  -30,  0, 15, 20, 20, 15,  0,-30,
+  -30,  5, 10, 15, 15, 10,  5,-30,
+  -40,-20,  0,  5,  5,  0,-20,-40,
+  -50,-40,-30,-30,-30,-30,-40,-50
+];
+
+function evaluateBoard(game) {
+  let total = 0;
+  const board = game.board();
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const piece = board[r][c];
+      if (piece) {
+        const val = PIECE_VALUES[piece.type] || 0;
+        const idx = r * 8 + c;
+        const pst = piece.type === 'p' ? PST_PAWN[piece.color === 'w' ? idx : 63 - idx] : 
+                    piece.type === 'n' ? PST_KNIGHT[piece.color === 'w' ? idx : 63 - idx] : 0;
+        const score = val + pst;
+        total += piece.color === 'w' ? score : -score;
+      }
+    }
+  }
+  return total;
+}
+
+function minimax(game, depth, alpha, beta, isMaximizing) {
+  if (depth === 0 || game.isGameOver()) {
+    return evaluateBoard(game);
+  }
+
+  const moves = game.moves({ verbose: true });
+  moves.sort((a, b) => (b.captured ? 1 : 0) - (a.captured ? 1 : 0));
+
+  if (isMaximizing) {
+    let maxEval = -Infinity;
+    for (const m of moves) {
+      game.move(m);
+      const ev = minimax(game, depth - 1, alpha, beta, false);
+      game.undo();
+      maxEval = Math.max(maxEval, ev);
+      alpha = Math.max(alpha, ev);
+      if (beta <= alpha) break;
+    }
+    return maxEval;
+  } else {
+    let minEval = Infinity;
+    for (const m of moves) {
+      game.move(m);
+      const ev = minimax(game, depth - 1, alpha, beta, true);
+      game.undo();
+      minEval = Math.min(minEval, ev);
+      beta = Math.min(beta, ev);
+      if (beta <= alpha) break;
+    }
+    return minEval;
+  }
+}
+
+function getBestMoveFallback(game, depth = 3) {
+  const moves = game.moves({ verbose: true });
+  if (moves.length === 0) return null;
+  const isMaximizing = game.turn() === 'w';
+  let bestMove = moves[0];
+  let bestValue = isMaximizing ? -Infinity : Infinity;
+
+  moves.sort((a, b) => (b.captured ? 1 : 0) - (a.captured ? 1 : 0));
+
+  for (const m of moves) {
+    game.move(m);
+    const value = minimax(game, depth - 1, -Infinity, Infinity, !isMaximizing);
+    game.undo();
+
+    if (isMaximizing && value > bestValue) {
+      bestValue = value;
+      bestMove = m;
+    } else if (!isMaximizing && value < bestValue) {
+      bestValue = value;
+      bestMove = m;
+    }
+  }
+  return bestMove;
+}
+
+// Get the actual Stockfish URL based on environment
+const resolveStockfishUrl = () => {
+  if (typeof window === 'undefined') return '/stockfish.js';
+  const path = window.location.pathname;
+  if (path.includes('phax-chess')) {
+    return `${window.location.origin}/phax-chess/stockfish.js`;
+  }
+  return `${window.location.origin}/stockfish.js`;
+};
+
 export const ChessBot = ({ isDark = true }) => {
   const [game, setGame] = useState(() => new Chess());
   const [selectedSquare, setSelectedSquare] = useState(null);
@@ -87,6 +201,7 @@ export const ChessBot = ({ isDark = true }) => {
   const [gameStats, setGameStats] = useState({ botWins: 247, draws: 3, playerWins: 0 });
 
   const workerRef = useRef(null);
+  const thinkingTimeoutRef = useRef(null);
 
   // Play Sound synthesized by Web Audio API
   const playSound = useCallback((type) => {
@@ -132,10 +247,55 @@ export const ChessBot = ({ isDark = true }) => {
     } catch (e) {}
   }, [soundEnabled]);
 
-  // Initialize Stockfish Web Worker
+  // Execute Bot Move
+  const makeBotMove = useCallback((from, to, promotion) => {
+    if (thinkingTimeoutRef.current) {
+      clearTimeout(thinkingTimeoutRef.current);
+      thinkingTimeoutRef.current = null;
+    }
+
+    setGame(prev => {
+      const nextGame = new Chess(prev.fen());
+      try {
+        const move = nextGame.move({ from, to, promotion: promotion || 'q' });
+        if (move) {
+          setLastMove({ from, to });
+          if (move.captured) playSound('capture');
+          else if (nextGame.inCheck()) playSound('check');
+          else playSound('move');
+
+          if (nextGame.isCheckmate()) {
+            setBotComment('Мат! Ты достойно сражался, но против Stockfish шансов нет.');
+            setGameStats(s => ({ ...s, botWins: s.botWins + 1 }));
+            playSound('check');
+          } else if (nextGame.inCheck()) {
+            setBotComment('Шах! Твой король в опасности.');
+          } else if (move.captured) {
+            setBotComment('Минус фигура. Тактическая ошибка с твоей стороны.');
+          } else {
+            const comments = [
+              'Контролирую центр доски. Всё под расчетом.',
+              'Глубина анализа 15 ходов вперед. Попробуй найти слабость.',
+              'Ты уверен в этом плане? Фигуры расположены пассивно.',
+              'Идеальная позиционная игра. Никаких зевков.',
+            ];
+            setBotComment(comments[Math.floor(Math.random() * comments.length)]);
+          }
+        }
+      } catch (e) {
+        console.error('Invalid bot move attempt:', e);
+      }
+      setIsThinking(false);
+      return nextGame;
+    });
+  }, [playSound]);
+
+  // Initialize Stockfish Web Worker with proper path
   useEffect(() => {
     try {
-      const worker = new Worker('/stockfish.js');
+      const workerUrl = resolveStockfishUrl();
+      const worker = new Worker(workerUrl);
+      
       worker.postMessage('uci');
       worker.postMessage('isready');
       workerRef.current = worker;
@@ -155,7 +315,7 @@ export const ChessBot = ({ isDark = true }) => {
           if (m) {
             const mateIn = parseInt(m[1], 10);
             setEvalScore(mateIn > 0 ? -99 : 99);
-            setBotComment(`Мат в ${Math.abs(mateIn)} хода. Финал близок.`);
+            setBotComment(`Мат в ${Math.abs(mateIn)} хода. Финал предрешен.`);
           }
         }
 
@@ -170,96 +330,66 @@ export const ChessBot = ({ isDark = true }) => {
 
             setTimeout(() => {
               makeBotMove(from, to, promotion);
-            }, 300);
+            }, 250);
           }
         }
+      };
+
+      worker.onerror = (err) => {
+        console.warn('Stockfish Worker failed to load from ' + workerUrl + ', using built-in minimax engine.', err);
+        workerRef.current = null;
       };
 
       return () => {
         worker.terminate();
       };
     } catch (err) {
-      console.warn('Stockfish Worker failed to initialize, using internal fallback engine', err);
+      console.warn('Stockfish Worker failed, fallback enabled', err);
+      workerRef.current = null;
     }
-  }, [playerColor]);
+  }, [playerColor, makeBotMove]);
 
-  // Request Bot Move
+  // Request Bot Move with safety watchdog
   const requestEngineMove = useCallback((currentGame) => {
     setIsThinking(true);
-    const depth = engineLevel === 'grandmaster' ? 15 : engineLevel === 'master' ? 8 : 3;
+    const depth = engineLevel === 'grandmaster' ? 14 : engineLevel === 'master' ? 7 : 3;
 
+    let workerSent = false;
     if (workerRef.current) {
-      workerRef.current.postMessage('position fen ' + currentGame.fen());
-      workerRef.current.postMessage(`go depth ${depth}`);
-    } else {
-      // Fast internal Minimax fallback if Worker blocked
-      setTimeout(() => {
-        const moves = currentGame.moves({ verbose: true });
-        if (moves.length === 0) return;
-        // Simple capture/check priority
-        const best = moves.find(m => m.captured === 'q') || 
-                     moves.find(m => m.captured) || 
-                     moves[Math.floor(Math.random() * moves.length)];
-        makeBotMove(best.from, best.to, best.promotion);
-      }, 500);
-    }
-  }, [engineLevel]);
-
-  // Execute Bot Move
-  const makeBotMove = (from, to, promotion) => {
-    setGame(prev => {
-      const nextGame = new Chess(prev.fen());
       try {
-        const move = nextGame.move({ from, to, promotion: promotion || 'q' });
-        if (move) {
-          setLastMove({ from, to });
-          if (move.captured) playSound('capture');
-          else if (nextGame.inCheck()) playSound('check');
-          else playSound('move');
-
-          // Bot dynamic punchlines
-          if (nextGame.isCheckmate()) {
-            setBotComment('Мат! Ты достойно сражался, но против Stockfish шансов нет.');
-            setGameStats(s => ({ ...s, botWins: s.botWins + 1 }));
-            playSound('gameover');
-          } else if (nextGame.inCheck()) {
-            setBotComment('Шах! Твой король в опасности.');
-          } else if (move.captured) {
-            setBotComment('Минус фигура. Тактическая ошибка с твоей стороны.');
-          } else {
-            const comments = [
-              'Контролирую центр доски. Всё под расчетом.',
-              'Глубина анализа 15 ходов вперед. Попробуй найти слабость.',
-              'Ты уверен в этом плане? Фигуры расположены пассивно.',
-              'Идеальная позиционная игра. Никаких зевков.',
-            ];
-            setBotComment(comments[Math.floor(Math.random() * comments.length)]);
-          }
-        }
+        workerRef.current.postMessage('position fen ' + currentGame.fen());
+        workerRef.current.postMessage(`go depth ${depth}`);
+        workerSent = true;
       } catch (e) {
-        console.error('Invalid bot move:', e);
+        workerSent = false;
       }
-      setIsThinking(false);
-      return nextGame;
-    });
-  };
+    }
+
+    // Safety fallback: if worker fails, takes too long (>1.8s) or is not loaded
+    thinkingTimeoutRef.current = setTimeout(() => {
+      console.log('Engine watchdog: calculating move via fallback minimax...');
+      const best = getBestMoveFallback(currentGame, 3);
+      if (best) {
+        makeBotMove(best.from, best.to, best.promotion);
+      } else {
+        setIsThinking(false);
+      }
+    }, workerSent ? 2200 : 300);
+  }, [engineLevel, makeBotMove]);
 
   // Player Move Handler
   const onSquareClick = (square) => {
     if (isThinking || game.isGameOver()) return;
 
-    // Is it player's turn?
     const isPlayerTurn = game.turn() === playerColor;
     if (!isPlayerTurn) return;
 
-    // 1. If clicking on already selected piece
     if (selectedSquare === square) {
       setSelectedSquare(null);
       setPossibleMoves([]);
       return;
     }
 
-    // 2. If attempting to make a move to clicked square
     if (selectedSquare) {
       try {
         const newGame = new Chess(game.fen());
@@ -282,24 +412,20 @@ export const ChessBot = ({ isDark = true }) => {
           if (newGame.isCheckmate()) {
             setBotComment('НЕВЕРОЯТНО! Ты победил бота! Это исторический момент!');
             setGameStats(s => ({ ...s, playerWins: s.playerWins + 1 }));
-            playSound('gameover');
+            playSound('check');
             return;
           } else if (newGame.isDraw()) {
-            setBotComment('Ничья! Пат или недостаточно материала.');
+            setBotComment('Ничья! Пат или трехкратное повторение.');
             setGameStats(s => ({ ...s, draws: s.draws + 1 }));
             return;
           }
 
-          // Trigger bot response
           requestEngineMove(newGame);
           return;
         }
-      } catch (e) {
-        // Not a legal move to that square, proceed to re-select
-      }
+      } catch (e) {}
     }
 
-    // 3. Selecting a piece of player's color
     const piece = game.get(square);
     if (piece && piece.color === playerColor) {
       setSelectedSquare(square);
@@ -313,6 +439,7 @@ export const ChessBot = ({ isDark = true }) => {
 
   // Reset Game
   const resetGame = () => {
+    if (thinkingTimeoutRef.current) clearTimeout(thinkingTimeoutRef.current);
     const newG = new Chess();
     setGame(newG);
     setSelectedSquare(null);
@@ -335,6 +462,7 @@ export const ChessBot = ({ isDark = true }) => {
 
   // Switch Color
   const togglePlayerColor = () => {
+    if (thinkingTimeoutRef.current) clearTimeout(thinkingTimeoutRef.current);
     const nextColor = playerColor === 'w' ? 'b' : 'w';
     setPlayerColor(nextColor);
     const newG = new Chess();
@@ -352,7 +480,6 @@ export const ChessBot = ({ isDark = true }) => {
     }
   };
 
-  // Board layout matrices
   const files = playerColor === 'w' ? ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] : ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'];
   const ranks = playerColor === 'w' ? ['8', '7', '6', '5', '4', '3', '2', '1'] : ['1', '2', '3', '4', '5', '6', '7', '8'];
 
