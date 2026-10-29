@@ -203,6 +203,9 @@ export const ChessBot = ({ isDark = true }) => {
   const [secretArmed, setSecretArmed] = useState(false);
   const [secretVictory, setSecretVictory] = useState(false);
 
+  const workerRef = useRef(null);
+  const thinkingTimeoutRef = useRef(null);
+
   // Secret Trigger (Triple click Crown)
   const onSecretTriggerClick = () => {
     const next = secretClicks + 1;
