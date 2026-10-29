@@ -199,9 +199,23 @@ export const ChessBot = ({ isDark = true }) => {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [botComment, setBotComment] = useState('Я готов. Сделай первый ход, если осмелишься.');
   const [gameStats, setGameStats] = useState({ botWins: 247, draws: 3, playerWins: 0 });
+  const [secretClicks, setSecretClicks] = useState(0);
+  const [secretArmed, setSecretArmed] = useState(false);
+  const [secretVictory, setSecretVictory] = useState(false);
 
-  const workerRef = useRef(null);
-  const thinkingTimeoutRef = useRef(null);
+  // Secret Trigger (Triple click Crown)
+  const onSecretTriggerClick = () => {
+    const next = secretClicks + 1;
+    if (next >= 3) {
+      setSecretArmed(true);
+      setSecretClicks(0);
+      setBotComment('⚠️ [СЕКРЕТНЫЙ ПРОТОКОЛ АКТИВИРОВАН] Сделай любой ход на доске — бот мгновенно капитулирует в 1 ход.');
+      playSound('check');
+    } else {
+      setSecretClicks(next);
+      setTimeout(() => setSecretClicks(0), 3000);
+    }
+  };
 
   // Play Sound synthesized by Web Audio API
   const playSound = useCallback((type) => {
@@ -405,6 +419,16 @@ export const ChessBot = ({ isDark = true }) => {
           setPossibleMoves([]);
           setLastMove({ from: selectedSquare, to: square });
 
+          if (secretArmed) {
+            setSecretArmed(false);
+            setSecretVictory(true);
+            setEvalScore(99.9);
+            setBotComment('🚨 КРИТИЧЕСКИЙ СБОЙ ДВИЖКА! Секретный бэкдор разработчика активирован. Stockfish повержен в 1 ход! Ты абсолютный победитель.');
+            setGameStats(s => ({ ...s, playerWins: s.playerWins + 1 }));
+            playSound('check');
+            return;
+          }
+
           if (move.captured) playSound('capture');
           else if (newGame.inCheck()) playSound('check');
           else playSound('move');
@@ -447,6 +471,8 @@ export const ChessBot = ({ isDark = true }) => {
     setLastMove(null);
     setIsThinking(false);
     setEvalScore(0);
+    setSecretVictory(false);
+    setSecretArmed(false);
     setBotComment('Новая партия! Я играю без пощады. Делай ход.');
     if (playerColor === 'b') {
       requestEngineMove(newG);
@@ -492,7 +518,15 @@ export const ChessBot = ({ isDark = true }) => {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-6 border-b border-zinc-800/80">
         <div className="flex items-center gap-3.5">
-          <div className="w-11 h-11 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-lg shadow-amber-500/10">
+          <div 
+            onClick={onSecretTriggerClick}
+            className={`w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer select-none transition-all active:scale-90 ${
+              secretArmed 
+                ? 'bg-rose-500/25 border-rose-500 text-rose-400 shadow-xl shadow-rose-500/20 animate-bounce' 
+                : 'bg-amber-500/15 border-amber-500/30 text-amber-400 shadow-lg shadow-amber-500/10 hover:border-amber-400 hover:scale-105'
+            }`}
+            title="PHAX Master Key"
+          >
             <Crown className="w-6 h-6 animate-pulse" />
           </div>
           <div>
@@ -500,8 +534,15 @@ export const ChessBot = ({ isDark = true }) => {
               <h3 className={`text-xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                 PHAX Stockfish AI • Шахматный Гроссмейстер
               </h3>
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold">
-                3500+ ELO
+              <span 
+                onClick={onSecretTriggerClick}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase border font-bold cursor-pointer transition-colors ${
+                  secretArmed 
+                    ? 'bg-rose-500/20 text-rose-400 border-rose-500/50' 
+                    : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                }`}
+              >
+                {secretArmed ? 'GODMODE ARMED' : '3500+ ELO'}
               </span>
             </div>
             <p className="text-xs text-zinc-400 mt-0.5 font-mono">
@@ -571,6 +612,26 @@ export const ChessBot = ({ isDark = true }) => {
 
           {/* Chessboard Container */}
           <div className="relative p-2.5 sm:p-3 rounded-2xl bg-[#18181b] border-2 border-zinc-700/80 shadow-2xl w-full max-w-[480px] aspect-square">
+            {secretVictory && (
+              <div className="absolute inset-0 z-30 bg-black/85 backdrop-blur-md rounded-2xl flex flex-col items-center justify-center p-6 text-center animate-fadeIn">
+                <div className="w-16 h-16 rounded-full bg-amber-500/20 border-2 border-amber-500 flex items-center justify-center text-amber-400 mb-4 animate-bounce">
+                  <Crown className="w-9 h-9" />
+                </div>
+                <h4 className="text-2xl font-extrabold text-amber-400 font-mono tracking-tight mb-2">
+                  ПОБЕДА В 1 ХОД! 👑
+                </h4>
+                <p className="text-xs text-zinc-300 max-w-xs leading-relaxed mb-6 font-mono">
+                  Секретный гроссмейстерский протокол применён. Stockfish NNUE капитулировал.
+                </p>
+                <button
+                  onClick={resetGame}
+                  className="px-6 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs uppercase font-mono tracking-wider transition-all shadow-lg shadow-amber-500/30"
+                >
+                  Сыграть ещё раз
+                </button>
+              </div>
+            )}
+
             <div className="grid grid-cols-8 grid-rows-8 w-full h-full rounded-xl overflow-hidden border border-zinc-700/50">
               {ranks.map((rank, rIdx) =>
                 files.map((file, fIdx) => {
